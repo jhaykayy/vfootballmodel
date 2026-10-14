@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 
 from football_predictor.config import Settings
-from football_predictor.models import League, Prediction, PredictionOutcome
+from football_predictor.models import CompletedMatch, League, Prediction, PredictionOutcome
 from football_predictor.prediction import generate_prediction
 from football_predictor.services import (
     FixtureInput,
@@ -11,6 +11,7 @@ from football_predictor.services import (
     add_completed_match,
     add_completed_matches,
     add_upcoming_fixture,
+    delete_completed_matches,
 )
 from football_predictor.training import train_league
 
@@ -61,6 +62,18 @@ def test_training_prediction_and_immutable_history(session, tmp_path):
     )
     assert session.scalar(select(func.count(Prediction.id))) == 2
     assert session.scalar(select(func.count(PredictionOutcome.id))) == 2
+    summary = delete_completed_matches(session, [session.scalar(
+        select(CompletedMatch.id).where(
+            CompletedMatch.match_date == fixture_day,
+            CompletedMatch.home_team_id == fixture.home_team_id,
+            CompletedMatch.away_team_id == fixture.away_team_id,
+        )
+    )])
+    assert summary.removed_evaluations == 2
+    assert session.scalar(select(func.count(Prediction.id))) == 2
+    assert session.scalar(select(func.count(PredictionOutcome.id))) == 0
+    assert fixture.status == "scheduled"
+    assert not version.is_active
 
 
 import pytest

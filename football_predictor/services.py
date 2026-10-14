@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Iterable, Optional
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -13,7 +13,9 @@ from .elo import rebuild_elo_history
 from .exceptions import DuplicateMatchError, ValidationError
 from .models import (
     CompletedMatch,
+    EloRatingHistory,
     League,
+    ModelVersion,
     Prediction,
     PredictionOutcome,
     Season,
@@ -40,6 +42,14 @@ class FixtureInput:
     match_date: date
     home_team: str
     away_team: str
+
+
+@dataclass(frozen=True)
+class DeletionSummary:
+    deleted_matches: int
+    removed_evaluations: int
+    deactivated_models: int
+    league_codes: tuple[str, ...]
 
 
 def _clean_name(value: str, field: str) -> str:
@@ -314,4 +324,93 @@ def list_match_rows(
         }
         for match, league, season, home_team, away_team in session.execute(query).all()
     ]
+
+
+def find_match_ids(
+    session: Session,
+    *,
+    league_code: Optional[str] = None,
+    search: str = "",
+) -> list[int]:
+    """Return every completed-match ID matching the history filters, without the UI row limit."""
+    home = aliased(Team)
+    away = aliased(Team)
+    query = (
+        select(CompletedMatch.id)
+        .join(League, CompletedMatch.league_id == League.id)
+        .join(home, CompletedMatch.home_team_id == home.id)
+        .join(away, CompletedMatch.away_team_id == away.id)
+        .order_by(CompletedMatch.match_date.desc(), CompletedMatch.id.desc())
+    )
+    if league_code:
+        query = query.where(League.code == league_code)
+    if search.strip():
+        pattern = f"%{search.strip()}%"
+        query = query.where(or_(home.name.ilike(pattern), away.name.ilike(pattern)))
+    return list(session.scalars(query).all())
+
+
+def delete_completed_matches(session: Session, match_ids: Iterable[int]) -> DeletionSummary:
+    """Delete results while preserving prediction snapshots and restoring dependent state."""
+    requested_ids = sorted({int(match_id) for match_id in match_ids})
+    if not requested_ids:
+        raise ValidationError("No completed matches were selected for deletion.")
+    matches = list(
+        session.scalars(
+            select(CompletedMatch)
+            .where(CompletedMatch.id.in_(requested_ids))
+            .order_by(CompletedMatch.match_date, CompletedMatch.id)
+        ).all()
+    )
+    if not matches:
+        raise ValidationError("The selected completed matches no longer exist.")
+
+    existing_ids = [match.id for match in matches]
+    league_ids = sorted({match.league_id for match in matches})
+    league_codes = tuple(
+        session.scalars(select(League.code).where(League.id.in_(league_ids)).order_by(League.code)).all()
+    )
+    removed_evaluations = session.scalar(
+        select(func.count(PredictionOutcome.id)).where(
+            PredictionOutcome.completed_match_id.in_(existing_ids)
+        )
+    ) or 0
+    deactivated_models = session.scalar(
+        select(func.count(ModelVersion.id)).where(
+            ModelVersion.league_id.in_(league_ids), ModelVersion.is_active.is_(True)
+        )
+    ) or 0
+
+    # A removed result makes the corresponding fixture pending again. Predictions remain immutable.
+    for match in matches:
+        fixtures = session.scalars(
+            select(UpcomingFixture).where(
+                UpcomingFixture.league_id == match.league_id,
+                UpcomingFixture.match_date == match.match_date,
+                UpcomingFixture.home_team_id == match.home_team_id,
+                UpcomingFixture.away_team_id == match.away_team_id,
+            )
+        ).all()
+        for fixture in fixtures:
+            fixture.status = "scheduled"
+
+    session.execute(
+        delete(PredictionOutcome).where(PredictionOutcome.completed_match_id.in_(existing_ids))
+    )
+    session.execute(delete(EloRatingHistory).where(EloRatingHistory.match_id.in_(existing_ids)))
+    session.execute(delete(CompletedMatch).where(CompletedMatch.id.in_(existing_ids)))
+    session.execute(
+        update(ModelVersion)
+        .where(ModelVersion.league_id.in_(league_ids), ModelVersion.is_active.is_(True))
+        .values(is_active=False)
+    )
+    session.flush()
+    for league_id in league_ids:
+        rebuild_elo_history(session, league_id)
+    return DeletionSummary(
+        deleted_matches=len(matches),
+        removed_evaluations=int(removed_evaluations),
+        deactivated_models=int(deactivated_models),
+        league_codes=league_codes,
+    )
 

@@ -7,6 +7,8 @@ It does **not** call a football API and does **not** produce a forecast until a 
 ## What is included
 
 - Manual completed-match entry, CSV/XLSX imports, duplicate prevention, search, filtering, and score corrections.
+- Safe single-record and bulk deletion for completed matches, protected by typed confirmation and followed by Elo rebuilding and model invalidation/retraining.
+- Screenshot OCR for completed results and upcoming fixtures, with team-name matching, confidence flags, an editable review table, and a mandatory confirmation step before any database write.
 - Chronological Elo history plus recent 5/10-match form, goals, venue form, streaks, opponent strength, rest, league scoring, and sample-limited head-to-head features.
 - Separate league models combining Poisson goal regression with calibrated XGBoost outcome probabilities when the dataset supports all three outcome classes. Small datasets fall back transparently to Poisson rather than pretending an advanced model is trained.
 - Chronological train/validation/test selection and expanding-window backtesting. A new candidate replaces the active version only when its latest holdout log loss is no worse beyond a small tolerance.
@@ -24,6 +26,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+brew install tesseract
 python scripts/init_db.py
 python scripts/create_templates.py
 streamlit run streamlit_app.py
@@ -34,10 +37,27 @@ The app opens locally, usually at `http://localhost:8501`.
 ## Normal workflow
 
 1. Open **Add Match Results** and upload historical data or enter results manually.
-2. After the configured minimum (20 by default), automatic retraining evaluates a candidate. You can also use **Model Management → Retrain model**.
-3. Add one or more matches in **Upcoming Fixtures**, then generate the batch.
-4. Review model-backed probabilities and data-reliability notes in **Predictions**.
-5. When a fixture finishes, add its completed result with the exact league, date, and teams. Its existing predictions are scored in **Model Performance**; the prediction records themselves are not changed.
+2. Alternatively, open **Screenshot Import**, choose whether the images contain results or fixtures, select the league, and upload PNG/JPG screenshots. Correct every uncertain field in the review table, then confirm the selected rows. OCR output is never saved automatically.
+3. After the configured minimum (20 by default), automatic retraining evaluates a candidate. You can also use **Model Management → Retrain model**.
+4. Add one or more matches in **Upcoming Fixtures**, then generate the batch.
+5. Review model-backed probabilities and data-reliability notes in **Predictions**.
+6. When a fixture finishes, add its completed result with the exact league, date, and teams. Its existing predictions are scored in **Model Performance**; the prediction records themselves are not changed.
+
+### Screenshot tips
+
+- Crop the image around the match list and use the original-resolution screenshot where possible.
+- Select the correct league so OCR names can be matched against that league's existing teams.
+- Use the fallback date only when the screenshot has no readable date heading.
+- Low-confidence review notes are warnings, not guesses to accept blindly. Edit the field before confirming.
+- A screenshot batch can be confirmed only once. Database duplicate constraints provide a second protection layer.
+
+For Streamlit Community Cloud, the included `packages.txt` installs the native Tesseract engine. The Python wrapper, Pillow, and RapidFuzz are declared in `requirements.txt`.
+
+### Deleting incorrect historical results
+
+Open **Add Match Results → History & edit**, then expand **Delete completed-match records** below the edit form. You can delete only the selected record or every record matching the current league/team filters. The app displays an exact confirmation phrase such as `DELETE 10`; the delete button remains disabled until that phrase is entered.
+
+Deleting a completed result rebuilds chronological Elo and invalidates models trained on the removed data. Historical prediction snapshots are retained, while result evaluations linked to deleted matches are removed. If enough results remain and automatic retraining is enabled, a replacement model is evaluated automatically.
 
 ## Import formats
 

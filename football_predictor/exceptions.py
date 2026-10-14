@@ -21,3 +21,11 @@ class ModelNotTrainedError(FootballPredictorError):
 class ModelTrainingError(FootballPredictorError):
     pass
 
+
+class OCRUnavailableError(FootballPredictorError):
+    pass
+
+
+class ScreenshotParseError(FootballPredictorError):
+    pass
+
