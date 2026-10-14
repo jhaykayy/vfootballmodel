@@ -42,7 +42,9 @@ from football_predictor.services import (
     get_league,
     list_match_rows,
     update_completed_match,
+    update_upcoming_fixture_kickoff,
 )
+from football_predictor.time_utils import display_kickoff, kickoff_parts, local_now
 from football_predictor.training import train_league
 
 
@@ -172,7 +174,12 @@ elif page == "Add Match Results":
         with st.form("manual_result", clear_on_submit=True):
             league_label = st.selectbox("League", list(LEAGUES))
             season = st.text_input("Season", placeholder="2025/26")
-            match_date = st.date_input("Match date", max_value=date.today())
+            kickoff_left, kickoff_right = st.columns(2)
+            match_date = kickoff_left.date_input("Match date", max_value=date.today())
+            match_time = kickoff_right.time_input(
+                "Kickoff time",
+                value=local_now().time().replace(second=0, microsecond=0),
+            )
             left, right = st.columns(2)
             home_team = left.text_input("Home team")
             away_team = right.text_input("Away team")
@@ -185,7 +192,16 @@ elif page == "Add Match Results":
                 with session_scope() as session:
                     add_completed_match(
                         session,
-                        MatchInput(code, season, match_date, home_team, away_team, int(home_goals), int(away_goals)),
+                        MatchInput(
+                            code,
+                            season,
+                            match_date,
+                            home_team,
+                            away_team,
+                            int(home_goals),
+                            int(away_goals),
+                            kickoff_time=match_time,
+                        ),
                     )
                 st.success("Match saved and league statistics recalculated.")
                 for message in auto_retrain({code}):
@@ -193,7 +209,10 @@ elif page == "Add Match Results":
             except FootballPredictorError as exc:
                 st.error(str(exc))
     with upload_tab:
-        st.write("Required columns: `league_code`, `season`, `match_date`, `home_team`, `away_team`, `home_goals`, `away_goals`.")
+        st.write(
+            "Required columns: `league_code`, `season`, `match_date`, `home_team`, `away_team`, "
+            "`home_goals`, `away_goals`. Add `kickoff_time` as HH:MM; omitted times default to 00:00."
+        )
         t1, t2 = st.columns(2)
         t1.download_button(
             "Download CSV template",
@@ -227,17 +246,19 @@ elif page == "Add Match Results":
         if rows:
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
             labels = {
-                f"#{row['id']} · {row['date']} · {row['home_team']} {row['home_goals']}–{row['away_goals']} {row['away_team']}": row
+                f"#{row['id']} · {row['date']} {row['kickoff_time']:%H:%M} · "
+                f"{row['home_team']} {row['home_goals']}–{row['away_goals']} {row['away_team']}": row
                 for row in rows
             }
             selected_label = st.selectbox("Edit a record", list(labels))
             selected = labels[selected_label]
             with st.form("edit_match"):
-                e1, e2, e3, e4 = st.columns(4)
+                e1, e2, e3, e4, e5 = st.columns(5)
                 edited_date = e1.date_input("Date", value=selected["date"])
-                edited_season = e2.text_input("Season", value=selected["season"])
-                edited_home = e3.number_input("Home goals", 0, 30, selected["home_goals"])
-                edited_away = e4.number_input("Away goals", 0, 30, selected["away_goals"])
+                edited_time = e2.time_input("Kickoff", value=selected["kickoff_time"])
+                edited_season = e3.text_input("Season", value=selected["season"])
+                edited_home = e4.number_input("Home goals", 0, 30, selected["home_goals"])
+                edited_away = e5.number_input("Away goals", 0, 30, selected["away_goals"])
                 save_edit = st.form_submit_button("Save correction")
             if save_edit:
                 try:
@@ -249,6 +270,7 @@ elif page == "Add Match Results":
                             season_name=edited_season,
                             home_goals=int(edited_home),
                             away_goals=int(edited_away),
+                            kickoff_time=edited_time,
                         )
                     st.success("Correction saved; chronological Elo and linked prediction outcomes were recalculated.")
                     for message in auto_retrain({selected["league_code"]}):
@@ -320,12 +342,17 @@ elif page == "Screenshot Import":
     screenshot_league_label = setup_right.selectbox("League", list(LEAGUES), key="ocr_league")
     screenshot_code = LEAGUES[screenshot_league_label]
     screenshot_teams = team_names(screenshot_code)
-    details_left, details_middle, details_right = st.columns(3)
+    details_left, details_middle, details_time, details_right = st.columns(4)
     screenshot_season = details_left.text_input("Season", placeholder="2025/26", key="ocr_season")
     default_screenshot_date = details_middle.date_input(
         "Fallback date",
         value=date.today(),
         help="Used only when a date cannot be read from the screenshot.",
+    )
+    default_screenshot_time = details_time.time_input(
+        "Fallback kickoff",
+        value=local_now().time().replace(second=0, microsecond=0),
+        help="Used only when a kickoff time cannot be read from the screenshot.",
     )
     day_first = details_right.checkbox(
         "Dates use day/month/year",
@@ -375,6 +402,7 @@ elif page == "Screenshot Import":
                     default_date=default_screenshot_date,
                     source_image=screenshot_file.name,
                     day_first=day_first,
+                    default_time=default_screenshot_time,
                 )
                 if not parsed.rows.empty:
                     extracted_frames.append(parsed.rows)
@@ -391,7 +419,7 @@ elif page == "Screenshot Import":
             if extracted_frames:
                 review_frame = pd.concat(extracted_frames, ignore_index=True)
             else:
-                base_columns = ["include", "match_date", "home_team", "away_team"]
+                base_columns = ["include", "match_date", "kickoff_time", "home_team", "away_team"]
                 if parse_mode == "results":
                     base_columns += ["home_goals", "away_goals"]
                 base_columns += ["confidence", "review", "source_image", "source_text"]
@@ -422,7 +450,7 @@ elif page == "Screenshot Import":
         review_frame = st.session_state["ocr_review_frame"]
         st.subheader("Verify extracted rows")
         st.caption(
-            "Edit any incorrect date, team, or score. Confidence and review notes describe the original OCR extraction. "
+            "Edit any incorrect date, kickoff time, team, or score. Confidence and review notes describe the original OCR extraction. "
             "Untick Include for rows you do not want to save."
         )
         edited_frame = st.data_editor(
@@ -434,6 +462,7 @@ elif page == "Screenshot Import":
             column_config={
                 "include": st.column_config.CheckboxColumn("Include", default=True),
                 "match_date": st.column_config.TextColumn("Match date", help="Use YYYY-MM-DD"),
+                "kickoff_time": st.column_config.TextColumn("Kickoff", help="Use HH:MM"),
                 "home_team": st.column_config.TextColumn("Home team", required=True),
                 "away_team": st.column_config.TextColumn("Away team", required=True),
                 "home_goals": st.column_config.NumberColumn(
@@ -512,7 +541,14 @@ elif page == "Upcoming Fixtures":
             st.warning("Add historical results for at least two teams first.")
         with st.form("fixture_form", clear_on_submit=True):
             season = st.text_input("Season", placeholder="2025/26", key="fixture_season")
-            fixture_date = st.date_input("Scheduled date", min_value=date.today())
+            kickoff_left, kickoff_right = st.columns(2)
+            fixture_date = kickoff_left.date_input(
+                "Scheduled date", min_value=local_now().date()
+            )
+            fixture_time = kickoff_right.time_input(
+                "Kickoff time",
+                value=local_now().time().replace(second=0, microsecond=0),
+            )
             c1, c2 = st.columns(2)
             home = c1.selectbox("Home team", known_teams, disabled=not known_teams)
             away = c2.selectbox("Away team", known_teams, disabled=not known_teams)
@@ -520,7 +556,17 @@ elif page == "Upcoming Fixtures":
         if add_fixture:
             try:
                 with session_scope() as session:
-                    add_upcoming_fixture(session, FixtureInput(code, season or None, fixture_date, home, away))
+                    add_upcoming_fixture(
+                        session,
+                        FixtureInput(
+                            code,
+                            season or None,
+                            fixture_date,
+                            home,
+                            away,
+                            kickoff_time=fixture_time,
+                        ),
+                    )
                 st.success("Fixture added.")
             except FootballPredictorError as exc:
                 st.error(str(exc))
@@ -544,7 +590,9 @@ elif page == "Upcoming Fixtures":
             fixture_rows = [
                 {
                     "id": item.id,
-                    "date": item.match_date,
+                    "kickoff": item.match_date,
+                    "date": kickoff_parts(item.match_date)[0],
+                    "kickoff_time": kickoff_parts(item.match_date)[1],
                     "league": item.league.name,
                     "home": item.home_team.name,
                     "away": item.away_team.name,
@@ -552,7 +600,44 @@ elif page == "Upcoming Fixtures":
                 for item in fixtures
             ]
         if fixture_rows:
-            st.dataframe(pd.DataFrame(fixture_rows), width="stretch", hide_index=True)
+            st.dataframe(
+                pd.DataFrame(fixture_rows).drop(columns=["date", "kickoff_time"]),
+                width="stretch",
+                hide_index=True,
+            )
+            fixture_labels = {
+                f"#{item['id']} · {display_kickoff(item['kickoff'])} · "
+                f"{item['home']} vs {item['away']}": item
+                for item in fixture_rows
+            }
+            selected_fixture_label = st.selectbox(
+                "Correct a scheduled kickoff",
+                list(fixture_labels),
+                key="fixture_schedule_edit",
+            )
+            selected_fixture = fixture_labels[selected_fixture_label]
+            with st.form("edit_fixture_kickoff"):
+                edit_left, edit_right = st.columns(2)
+                corrected_fixture_date = edit_left.date_input(
+                    "Correct date", value=selected_fixture["date"]
+                )
+                corrected_fixture_time = edit_right.time_input(
+                    "Correct time", value=selected_fixture["kickoff_time"]
+                )
+                save_fixture_time = st.form_submit_button("Save kickoff correction")
+            if save_fixture_time:
+                try:
+                    with session_scope() as session:
+                        update_upcoming_fixture_kickoff(
+                            session,
+                            selected_fixture["id"],
+                            match_date=corrected_fixture_date,
+                            kickoff_time=corrected_fixture_time,
+                        )
+                    st.success("Fixture kickoff corrected.")
+                    st.rerun()
+                except FootballPredictorError as exc:
+                    st.error(str(exc))
             if st.button("Generate predictions for all scheduled fixtures", type="primary"):
                 successes, failures = [], []
                 for item in fixture_rows:
@@ -577,7 +662,8 @@ elif page == "Predictions":
         for prediction in items:
             fixture = prediction.fixture
             with st.expander(
-                f"{fixture.match_date} · {fixture.home_team.name} vs {fixture.away_team.name} · {prediction.most_likely_score}",
+                f"{display_kickoff(fixture.match_date)} · {fixture.home_team.name} vs "
+                f"{fixture.away_team.name} · {prediction.most_likely_score}",
                 expanded=False,
             ):
                 c1, c2, c3 = st.columns(3)

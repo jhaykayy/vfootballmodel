@@ -1,6 +1,6 @@
 # VFootball Intelligence
 
-VFootball Intelligence is a local, manual-data football prediction application for the Premier League, La Liga, Ligue 1, Serie A, and Bundesliga. It stores results in SQLite, builds every historical feature strictly from information available before kickoff, fits league-specific models, preserves prediction snapshots, and evaluates those predictions when final scores arrive.
+VFootball Intelligence is a manual-data football prediction application for the Premier League, La Liga, Ligue 1, Serie A, and Bundesliga. It supports local SQLite or shared PostgreSQL, builds every historical feature strictly from information available before the exact kickoff timestamp, fits league-specific models, preserves prediction snapshots, and evaluates those predictions when final scores arrive.
 
 It does **not** call a football API and does **not** produce a forecast until a league has enough user-supplied results to fit and validate a model.
 
@@ -9,7 +9,7 @@ It does **not** call a football API and does **not** produce a forecast until a 
 - Manual completed-match entry, CSV/XLSX imports, duplicate prevention, search, filtering, and score corrections.
 - Safe single-record and bulk deletion for completed matches, protected by typed confirmation and followed by Elo rebuilding and model invalidation/retraining.
 - Screenshot OCR for completed results and upcoming fixtures, with team-name matching, confidence flags, an editable review table, and a mandatory confirmation step before any database write.
-- Chronological Elo history plus recent 5/10-match form, goals, venue form, streaks, opponent strength, rest, league scoring, and sample-limited head-to-head features.
+- Exact date-and-time chronological Elo history plus recent 5/10-match form, goals, venue form, streaks, opponent strength, rest, league scoring, and sample-limited head-to-head features. Simultaneous fixtures are processed as a batch so they cannot leak results into one another.
 - Separate league models combining Poisson goal regression with calibrated XGBoost outcome probabilities when the dataset supports all three outcome classes. Small datasets fall back transparently to Poisson rather than pretending an advanced model is trained.
 - Chronological train/validation/test selection and expanding-window backtesting. A new candidate replaces the active version only when its latest holdout log loss is no worse beyond a small tolerance.
 - Internally consistent 1X2, score, totals, and BTTS probabilities. The score matrix is adjusted to share the exact same 1X2 marginals as the selected outcome ensemble.
@@ -41,7 +41,7 @@ The app opens locally, usually at `http://localhost:8501`.
 3. After the configured minimum (20 by default), automatic retraining evaluates a candidate. You can also use **Model Management → Retrain model**.
 4. Add one or more matches in **Upcoming Fixtures**, then generate the batch.
 5. Review model-backed probabilities and data-reliability notes in **Predictions**.
-6. When a fixture finishes, add its completed result with the exact league, date, and teams. Its existing predictions are scored in **Model Performance**; the prediction records themselves are not changed.
+6. When a fixture finishes, add its completed result with the exact league, kickoff date/time, and teams. Its existing predictions are scored in **Model Performance**; the prediction records themselves are not changed.
 
 ### Screenshot tips
 
@@ -64,10 +64,10 @@ Deleting a completed result rebuilds chronological Elo and invalidates models tr
 Completed results require:
 
 ```text
-league_code,season,match_date,home_team,away_team,home_goals,away_goals
+league_code,season,match_date,kickoff_time,home_team,away_team,home_goals,away_goals
 ```
 
-Upcoming fixtures require the same fields without the two score columns. Dates should use ISO `YYYY-MM-DD`. Supported league codes are:
+Upcoming fixtures require the same fields without the two score columns. Dates should use ISO `YYYY-MM-DD`, and kickoff times should use 24-hour `HH:MM`. The time column is accepted as optional for backward compatibility, but exact times are required when clubs can play more than once per day. Supported league codes are:
 
 | Code | League |
 |---|---|
@@ -85,7 +85,7 @@ The default threshold is intentionally low enough to exercise the workflow, not 
 
 For each retrain:
 
-- Features are regenerated in match-date order.
+- Features are regenerated in exact kickoff order. Matches sharing a kickoff timestamp all use the same pre-kickoff state.
 - Training, validation, and test partitions remain chronological.
 - Poisson, Elo, calibrated boosting, and the chosen ensemble are measured separately where available.
 - Expanding-window backtests refit only on prior matches.
@@ -113,13 +113,21 @@ export VFOOTBALL_DATABASE_URL='postgresql://postgres.PROJECT_REF:PASSWORD@POOLER
 streamlit run streamlit_app.py
 ```
 
+For a persistent localhost connection that survives terminal restarts, run this once and paste the URI at the hidden prompt:
+
+```bash
+.venv/bin/python scripts/configure_postgres.py
+```
+
+This verifies the database and writes `.streamlit/secrets.toml` with owner-only permissions. That file is ignored by Git. From then on, a normal `streamlit run streamlit_app.py` uses the same PostgreSQL database as the deployed app; new records appear in both places immediately and do not require another migration.
+
 For Streamlit Community Cloud, open **Manage app → Settings → Secrets** and add:
 
 ```toml
 VFOOTBALL_DATABASE_URL = "postgresql://postgres.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require"
 ```
 
-Replace the placeholders with the URI copied from Supabase. Never commit the completed URI or `.streamlit/secrets.toml`; the latter is already ignored by this repository. On first connection, the application creates its schema and five supported leagues automatically. An existing SQLite database is separate and is not copied automatically.
+Replace the placeholders with the URI copied from Supabase. Never commit the completed URI or `.streamlit/secrets.toml`; the latter is already ignored by this repository. On first connection, the application creates its schema and five supported leagues automatically. Model artifacts are stored in PostgreSQL as well as cached locally, so a model trained on one connected deployment can be loaded by another. An existing SQLite database is separate and is not copied automatically.
 
 To verify the connection and migrate only completed-match history from the default local SQLite database, first install the current requirements and set the PostgreSQL URI in the same terminal:
 
@@ -144,7 +152,7 @@ The suite covers chronological feature leakage, database updates and duplicate p
 
 - Probabilities describe model uncertainty; they are not guarantees or betting advice.
 - A reliability label describes data coverage, not the chance that the selected outcome will happen.
-- Predictions for dates at or before an active model's training cutoff are blocked because they could leak future results.
+- Predictions for kickoff timestamps at or before an active model's exact training cutoff are blocked. A later kickoff on the same day is allowed.
 - Promoted/relegated or new teams begin from neutral Elo and league scoring defaults. Their reliability remains limited until their own history grows.
 - Head-to-head is used only as a small feature and defaults toward league norms when fewer than three recent meetings exist.
 

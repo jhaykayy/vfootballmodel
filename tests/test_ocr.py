@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, time
 
 import pandas as pd
 import pytest
@@ -40,7 +40,9 @@ def test_parse_multiple_result_layouts_and_date_headings():
     rows = parse_result_lines(
         [
             line("14 October 2026"),
+            line("10AM"),
             line("Arsenal 2 - 1 Chelsea"),
+            line("10:15 AM"),
             line("Manchester City 3"),
             line("Liverpool 3"),
             line("15 October 2026"),
@@ -54,8 +56,10 @@ def test_parse_multiple_result_layouts_and_date_headings():
     )
     assert len(rows) == 3
     assert rows[0]["home_team"] == "Arsenal"
+    assert rows[0]["kickoff_time"] == "10:00"
     assert (rows[0]["home_goals"], rows[0]["away_goals"]) == (2, 1)
     assert rows[1]["home_team"] == "Manchester City"
+    assert rows[1]["kickoff_time"] == "10:15"
     assert (rows[1]["home_goals"], rows[1]["away_goals"]) == (3, 3)
     assert rows[2]["match_date"] == "2026-10-15"
     assert rows[2]["away_team"] == "Everton"
@@ -65,7 +69,7 @@ def test_parse_fixture_layouts_and_fallback_date():
     rows = parse_fixture_lines(
         [
             line("16/10/2026"),
-            line("Man Utd vs Chelsea"),
+            line("1015AM Man Utd vs Chelsea"),
             line("Arsenal"),
             line("Liverpool"),
         ],
@@ -77,6 +81,7 @@ def test_parse_fixture_layouts_and_fallback_date():
     assert len(rows) == 2
     assert rows[0]["home_team"] == "Manchester United"
     assert rows[0]["match_date"] == "2026-10-16"
+    assert rows[0]["kickoff_time"] == "10:15"
     assert rows[1]["home_team"] == "Arsenal"
     assert rows[1]["away_team"] == "Liverpool"
 

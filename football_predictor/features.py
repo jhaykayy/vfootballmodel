@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import datetime
+from itertools import groupby
 from typing import Iterable, Optional
 
 import numpy as np
@@ -60,7 +61,7 @@ FEATURE_COLUMNS = [
 
 @dataclass
 class Observation:
-    played_on: date
+    played_at: datetime
     goals_for: int
     goals_against: int
     points: int
@@ -72,7 +73,7 @@ class Observation:
 class TeamState:
     elo: float = DEFAULT_ELO
     observations: list[Observation] = field(default_factory=list)
-    last_match: Optional[date] = None
+    last_match: Optional[datetime] = None
 
 
 def _mean(items: list[Observation], attr: str, fallback: float) -> float:
@@ -118,7 +119,7 @@ class ChronologicalFeatureBuilder:
     def league_away_goals(self) -> float:
         return self.total_away_goals / self.match_count if self.match_count else 1.15
 
-    def build_row(self, home_team_id: int, away_team_id: int, played_on: date) -> dict[str, float]:
+    def build_row(self, home_team_id: int, away_team_id: int, played_at: datetime) -> dict[str, float]:
         home = self.states[home_team_id]
         away = self.states[away_team_id]
         league_home = self.league_home_goals
@@ -168,8 +169,8 @@ class ChronologicalFeatureBuilder:
             "away_win_streak": _streak(away, 3),
             "home_loss_streak": _streak(home, 0),
             "away_loss_streak": _streak(away, 0),
-            "home_rest_days": min((played_on - home.last_match).days, 30) if home.last_match else 7,
-            "away_rest_days": min((played_on - away.last_match).days, 30) if away.last_match else 7,
+            "home_rest_days": min((played_at - home.last_match).total_seconds() / 86400, 30) if home.last_match else 7,
+            "away_rest_days": min((played_at - away.last_match).total_seconds() / 86400, 30) if away.last_match else 7,
             "home_points_vs_strong_10": _points_against(home, "strong"),
             "away_points_vs_strong_10": _points_against(away, "strong"),
             "home_points_vs_weak_10": _points_against(home, "weak"),
@@ -187,7 +188,7 @@ class ChronologicalFeatureBuilder:
         self,
         home_team_id: int,
         away_team_id: int,
-        played_on: date,
+        played_at: datetime,
         home_goals: int,
         away_goals: int,
     ) -> None:
@@ -209,13 +210,13 @@ class ChronologicalFeatureBuilder:
         home_points = 3 if home_goals > away_goals else 1 if home_goals == away_goals else 0
         away_points = 3 if away_goals > home_goals else 1 if away_goals == home_goals else 0
         home.observations.append(
-            Observation(played_on, home_goals, away_goals, home_points, "H", home_category)
+            Observation(played_at, home_goals, away_goals, home_points, "H", home_category)
         )
         away.observations.append(
-            Observation(played_on, away_goals, home_goals, away_points, "A", away_category)
+            Observation(played_at, away_goals, home_goals, away_points, "A", away_category)
         )
-        home.last_match = played_on
-        away.last_match = played_on
+        home.last_match = played_at
+        away.last_match = played_at
         home.elo, away.elo = update_ratings(home_before, away_before, home_goals, away_goals)
         key = tuple(sorted((home_team_id, away_team_id)))
         if home_team_id == key[0]:
@@ -227,7 +228,7 @@ class ChronologicalFeatureBuilder:
         self.match_count += 1
 
 
-def _ordered_matches(session: Session, league_id: int, before: Optional[date] = None) -> list[CompletedMatch]:
+def _ordered_matches(session: Session, league_id: int, before: Optional[datetime] = None) -> list[CompletedMatch]:
     query = select(CompletedMatch).where(CompletedMatch.league_id == league_id)
     if before is not None:
         query = query.where(CompletedMatch.match_date < before)
@@ -237,25 +238,30 @@ def _ordered_matches(session: Session, league_id: int, before: Optional[date] = 
 def generate_training_frame(session: Session, league_id: int) -> pd.DataFrame:
     builder = ChronologicalFeatureBuilder()
     records: list[dict] = []
-    for match in _ordered_matches(session, league_id):
-        row = builder.build_row(match.home_team_id, match.away_team_id, match.match_date)
-        row.update(
-            {
-                "match_id": match.id,
-                "match_date": match.match_date,
-                "home_goals": match.home_goals,
-                "away_goals": match.away_goals,
-                "outcome": "H" if match.home_goals > match.away_goals else "A" if match.away_goals > match.home_goals else "D",
-            }
-        )
-        records.append(row)
-        builder.apply_result(
-            match.home_team_id,
-            match.away_team_id,
-            match.match_date,
-            match.home_goals,
-            match.away_goals,
-        )
+    ordered = _ordered_matches(session, league_id)
+    for _, group in groupby(ordered, key=lambda item: item.match_date):
+        simultaneous = list(group)
+        # Every fixture at the same kickoff is built from the same pre-kickoff state.
+        for match in simultaneous:
+            row = builder.build_row(match.home_team_id, match.away_team_id, match.match_date)
+            row.update(
+                {
+                    "match_id": match.id,
+                    "match_date": match.match_date,
+                    "home_goals": match.home_goals,
+                    "away_goals": match.away_goals,
+                    "outcome": "H" if match.home_goals > match.away_goals else "A" if match.away_goals > match.home_goals else "D",
+                }
+            )
+            records.append(row)
+        for match in simultaneous:
+            builder.apply_result(
+                match.home_team_id,
+                match.away_team_id,
+                match.match_date,
+                match.home_goals,
+                match.away_goals,
+            )
     return pd.DataFrame.from_records(records, columns=FEATURE_COLUMNS + ["match_id", "match_date", "home_goals", "away_goals", "outcome"])
 
 
@@ -264,7 +270,7 @@ def build_fixture_features(
     league_id: int,
     home_team_id: int,
     away_team_id: int,
-    fixture_date: date,
+    fixture_date: datetime,
 ) -> dict[str, float]:
     builder = ChronologicalFeatureBuilder()
     for match in _ordered_matches(session, league_id, before=fixture_date):

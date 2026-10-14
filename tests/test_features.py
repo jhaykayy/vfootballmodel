@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 from football_predictor.features import generate_training_frame
 from football_predictor.models import League
@@ -36,4 +36,28 @@ def test_league_average_excludes_current_result(session):
     frame = generate_training_frame(session, league.id)
     assert frame.iloc[1]["league_home_goals"] == 2.0
     assert frame.iloc[1]["league_away_goals"] == 0.0
+
+
+def test_same_kickoff_matches_do_not_leak_between_each_other(session):
+    kickoff_day = date(2026, 3, 1)
+    add_completed_matches(
+        session,
+        [
+            MatchInput(
+                "GER-BL", "2025/26", kickoff_day, "One", "Two", 6, 0, kickoff_time=time(10, 0)
+            ),
+            MatchInput(
+                "GER-BL", "2025/26", kickoff_day, "Three", "Four", 1, 1, kickoff_time=time(10, 0)
+            ),
+            MatchInput(
+                "GER-BL", "2025/26", kickoff_day, "One", "Three", 2, 1, kickoff_time=time(10, 15)
+            ),
+        ],
+    )
+    league = session.query(League).filter_by(code="GER-BL").one()
+    frame = generate_training_frame(session, league.id)
+    assert frame.iloc[0]["league_home_goals"] == 1.45
+    assert frame.iloc[1]["league_home_goals"] == 1.45
+    assert frame.iloc[2]["league_home_goals"] == 3.5
+    assert frame.iloc[2]["home_matches_played"] == 1
 

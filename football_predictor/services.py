@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Iterable, Optional
 
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -22,26 +22,37 @@ from .models import (
     Team,
     UpcomingFixture,
 )
+from .time_utils import display_kickoff, kickoff_datetime, kickoff_parts, local_now
 
 
 @dataclass(frozen=True)
 class MatchInput:
     league_code: str
     season: str
-    match_date: date
+    match_date: date | datetime
     home_team: str
     away_team: str
     home_goals: int
     away_goals: int
+    kickoff_time: time = time.min
+
+    @property
+    def kickoff_at(self) -> datetime:
+        return kickoff_datetime(self.match_date, self.kickoff_time)
 
 
 @dataclass(frozen=True)
 class FixtureInput:
     league_code: str
     season: Optional[str]
-    match_date: date
+    match_date: date | datetime
     home_team: str
     away_team: str
+    kickoff_time: time = time.min
+
+    @property
+    def kickoff_at(self) -> datetime:
+        return kickoff_datetime(self.match_date, self.kickoff_time)
 
 
 @dataclass(frozen=True)
@@ -93,8 +104,8 @@ def get_or_create_season(session: Session, league: League, name: str) -> Season:
 
 
 def _validate_match_input(data: MatchInput) -> None:
-    if data.match_date > date.today():
-        raise ValidationError("A completed match date cannot be in the future.")
+    if data.kickoff_at > local_now():
+        raise ValidationError("A completed match kickoff cannot be in the future.")
     if data.home_team.strip().casefold() == data.away_team.strip().casefold():
         raise ValidationError("Home and away teams must be different.")
     if isinstance(data.home_goals, bool) or isinstance(data.away_goals, bool):
@@ -116,19 +127,19 @@ def add_completed_match(session: Session, data: MatchInput, *, recalculate: bool
     duplicate = session.scalar(
         select(CompletedMatch).where(
             CompletedMatch.league_id == league.id,
-            CompletedMatch.match_date == data.match_date,
+            CompletedMatch.match_date == data.kickoff_at,
             CompletedMatch.home_team_id == home.id,
             CompletedMatch.away_team_id == away.id,
         )
     )
     if duplicate:
         raise DuplicateMatchError(
-            f"{home.name} vs {away.name} on {data.match_date.isoformat()} already exists."
+            f"{home.name} vs {away.name} at {display_kickoff(data.kickoff_at)} already exists."
         )
     match = CompletedMatch(
         league_id=league.id,
         season_id=season.id,
-        match_date=data.match_date,
+        match_date=data.kickoff_at,
         home_team_id=home.id,
         away_team_id=away.id,
         home_goals=int(data.home_goals),
@@ -162,14 +173,17 @@ def update_completed_match(
     session: Session,
     match_id: int,
     *,
-    match_date: date,
+    match_date: date | datetime,
     season_name: str,
     home_goals: int,
     away_goals: int,
+    kickoff_time: Optional[time] = None,
 ) -> CompletedMatch:
     match = session.get(CompletedMatch, match_id)
     if match is None:
         raise ValidationError("Match not found.")
+    if kickoff_time is None:
+        _, kickoff_time = kickoff_parts(match.match_date)
     data = MatchInput(
         league_code=match.league.code,
         season=season_name,
@@ -178,10 +192,11 @@ def update_completed_match(
         away_team=match.away_team.name,
         home_goals=home_goals,
         away_goals=away_goals,
+        kickoff_time=kickoff_time,
     )
     _validate_match_input(data)
     season = get_or_create_season(session, match.league, season_name)
-    match.match_date = match_date
+    match.match_date = data.kickoff_at
     match.season_id = season.id
     match.home_goals = int(home_goals)
     match.away_goals = int(away_goals)
@@ -205,7 +220,7 @@ def add_upcoming_fixture(session: Session, data: FixtureInput) -> UpcomingFixtur
     existing = session.scalar(
         select(UpcomingFixture).where(
             UpcomingFixture.league_id == league.id,
-            UpcomingFixture.match_date == data.match_date,
+            UpcomingFixture.match_date == data.kickoff_at,
             UpcomingFixture.home_team_id == home.id,
             UpcomingFixture.away_team_id == away.id,
         )
@@ -215,12 +230,42 @@ def add_upcoming_fixture(session: Session, data: FixtureInput) -> UpcomingFixtur
     fixture = UpcomingFixture(
         league_id=league.id,
         season_id=season_id,
-        match_date=data.match_date,
+        match_date=data.kickoff_at,
         home_team_id=home.id,
         away_team_id=away.id,
     )
     session.add(fixture)
     session.flush()
+    return fixture
+
+
+def update_upcoming_fixture_kickoff(
+    session: Session,
+    fixture_id: int,
+    *,
+    match_date: date | datetime,
+    kickoff_time: time,
+) -> UpcomingFixture:
+    fixture = session.get(UpcomingFixture, fixture_id)
+    if fixture is None:
+        raise ValidationError("Upcoming fixture not found.")
+    kickoff_at = kickoff_datetime(match_date, kickoff_time)
+    duplicate = session.scalar(
+        select(UpcomingFixture).where(
+            UpcomingFixture.id != fixture.id,
+            UpcomingFixture.league_id == fixture.league_id,
+            UpcomingFixture.match_date == kickoff_at,
+            UpcomingFixture.home_team_id == fixture.home_team_id,
+            UpcomingFixture.away_team_id == fixture.away_team_id,
+        )
+    )
+    if duplicate is not None:
+        raise DuplicateMatchError("That fixture already exists at the selected kickoff time.")
+    fixture.match_date = kickoff_at
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        raise DuplicateMatchError("That fixture already exists at the selected kickoff time.") from exc
     return fixture
 
 
@@ -316,7 +361,8 @@ def list_match_rows(
             "league": league.name,
             "league_code": league.code,
             "season": season.name,
-            "date": match.match_date,
+            "date": kickoff_parts(match.match_date)[0],
+            "kickoff_time": kickoff_parts(match.match_date)[1],
             "home_team": home_team.name,
             "away_team": away_team.name,
             "home_goals": match.home_goals,

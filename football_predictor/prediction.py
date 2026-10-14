@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import joblib
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,6 +7,7 @@ from sqlalchemy.orm import Session
 from .exceptions import ModelNotTrainedError, ValidationError
 from .features import build_fixture_features
 from .ml import ModelBundle, predict_one
+from .model_storage import load_model_bundle, model_bundle_exists
 from .models import ModelVersion, Prediction, UpcomingFixture
 from .probabilities import OUTCOME_ORDER, score_summary
 
@@ -24,7 +22,7 @@ def get_active_model(session: Session, league_id: int) -> ModelVersion:
         raise ModelNotTrainedError(
             "No trained model is active for this league. Add historical results and retrain first."
         )
-    if not Path(version.artifact_path).exists():
+    if not model_bundle_exists(session, version):
         raise ModelNotTrainedError("The active model artifact is missing. Retrain this league.")
     return version
 
@@ -77,9 +75,10 @@ def generate_prediction(session: Session, fixture_id: int) -> Prediction:
     version = get_active_model(session, fixture.league_id)
     if fixture.match_date <= version.training_cutoff:
         raise ValidationError(
-            "This fixture predates the active model's training cutoff; using it would leak future information."
+            "This fixture is at or before the active model's exact kickoff cutoff; "
+            "using it would leak future information."
         )
-    bundle: ModelBundle = joblib.load(version.artifact_path)
+    bundle: ModelBundle = load_model_bundle(session, version)
     features = build_fixture_features(
         session,
         fixture.league_id,

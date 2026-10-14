@@ -13,6 +13,7 @@ matches = pd.DataFrame(
             "league_code": "ENG-PL",
             "season": "2025/26",
             "match_date": "2026-08-15",
+            "kickoff_time": "10:15",
             "home_team": "Example Home",
             "away_team": "Example Away",
             "home_goals": 2,

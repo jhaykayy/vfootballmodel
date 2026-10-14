@@ -10,6 +10,7 @@ import pandas as pd
 from .config import SUPPORTED_LEAGUES
 from .exceptions import ValidationError
 from .services import FixtureInput, MatchInput
+from .time_utils import parse_kickoff_time
 
 
 MATCH_COLUMNS = [
@@ -57,6 +58,7 @@ def parse_match_upload(source, filename: str) -> list[MatchInput]:
             if league_code not in allowed:
                 raise ValueError(f"unsupported league_code {league_code!r}")
             parsed_date = pd.to_datetime(row["match_date"], errors="raise").date()
+            parsed_time = parse_kickoff_time(row.get("kickoff_time"))
             home_goals = int(row["home_goals"])
             away_goals = int(row["away_goals"])
             if float(row["home_goals"]) != home_goals or float(row["away_goals"]) != away_goals:
@@ -69,8 +71,9 @@ def parse_match_upload(source, filename: str) -> list[MatchInput]:
                 away_team=str(row["away_team"]).strip(),
                 home_goals=home_goals,
                 away_goals=away_goals,
+                kickoff_time=parsed_time,
             )
-            key = (league_code, parsed_date, item.home_team.casefold(), item.away_team.casefold())
+            key = (league_code, item.kickoff_at, item.home_team.casefold(), item.away_team.casefold())
             if key in keys:
                 raise ValueError("duplicate fixture inside upload")
             keys.add(key)
@@ -103,6 +106,7 @@ def parse_fixture_upload(source, filename: str) -> list[FixtureInput]:
                     match_date=pd.to_datetime(row["match_date"], errors="raise").date(),
                     home_team=str(row["home_team"]).strip(),
                     away_team=str(row["away_team"]).strip(),
+                    kickoff_time=parse_kickoff_time(row.get("kickoff_time")),
                 )
             )
         except Exception as exc:

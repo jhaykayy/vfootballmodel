@@ -9,6 +9,7 @@ from .db import initialize_database
 from .elo import rebuild_elo_history
 from .models import CompletedMatch, League, Team
 from .services import MatchInput, add_completed_match, reconcile_prediction_outcomes
+from .time_utils import display_kickoff, kickoff_parts, parse_kickoff_time
 
 
 @dataclass(frozen=True)
@@ -36,18 +37,27 @@ def read_match_history(source_engine: Engine) -> list[MatchInput]:
             )
             .order_by(CompletedMatch.match_date, CompletedMatch.id)
         ).all()
-        return [
-            MatchInput(
-                league_code=match.league.code,
-                season=match.season.name,
-                match_date=match.match_date,
-                home_team=match.home_team.name,
-                away_team=match.away_team.name,
-                home_goals=match.home_goals,
-                away_goals=match.away_goals,
+        rows = []
+        for match in matches:
+            match_day, match_time = kickoff_parts(match.match_date)
+            if match_time.hour == 0 and match_time.minute == 0:
+                try:
+                    match_time = parse_kickoff_time(match.season.name)
+                except ValueError:
+                    pass
+            rows.append(
+                MatchInput(
+                    league_code=match.league.code,
+                    season=match.season.name,
+                    match_date=match_day,
+                    home_team=match.home_team.name,
+                    away_team=match.away_team.name,
+                    home_goals=match.home_goals,
+                    away_goals=match.away_goals,
+                    kickoff_time=match_time,
+                )
             )
-            for match in matches
-        ]
+        return rows
 
 
 def _find_existing_match(session: Session, item: MatchInput) -> CompletedMatch | None:
@@ -60,7 +70,7 @@ def _find_existing_match(session: Session, item: MatchInput) -> CompletedMatch |
         .join(away, CompletedMatch.away_team_id == away.id)
         .where(
             League.code == item.league_code,
-            CompletedMatch.match_date == item.match_date,
+            CompletedMatch.match_date == item.kickoff_at,
             func.lower(home.name) == item.home_team.lower(),
             func.lower(away.name) == item.away_team.lower(),
         )
@@ -95,7 +105,7 @@ def migrate_match_history(source_engine: Engine, target_engine: Engine) -> Match
                 if not same_values:
                     raise MatchHistoryConflictError(
                         "Conflicting target match: "
-                        f"{item.match_date.isoformat()} {item.home_team} vs {item.away_team}. "
+                        f"{display_kickoff(item.kickoff_at)} {item.home_team} vs {item.away_team}. "
                         "Nothing from this migration was committed."
                     )
                 skipped += 1
@@ -120,7 +130,7 @@ def migrate_match_history(source_engine: Engine, target_engine: Engine) -> Match
             ):
                 raise RuntimeError(
                     "Post-migration verification failed for "
-                    f"{item.match_date.isoformat()} {item.home_team} vs {item.away_team}."
+                    f"{display_kickoff(item.kickoff_at)} {item.home_team} vs {item.away_team}."
                 )
         session.commit()
 

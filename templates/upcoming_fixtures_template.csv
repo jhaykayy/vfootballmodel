@@ -1,2 +1,2 @@
-league_code,season,match_date,home_team,away_team
-ENG-PL,2025/26,2026-08-15,Example Home,Example Away
+league_code,season,match_date,kickoff_time,home_team,away_team
+ENG-PL,2025/26,2026-08-15,10:15,Example Home,Example Away

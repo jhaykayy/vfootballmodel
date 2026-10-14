@@ -4,7 +4,7 @@ import re
 import shutil
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from io import BytesIO
 from typing import Iterable, Optional, Sequence
 
@@ -15,6 +15,7 @@ from rapidfuzz import fuzz, process
 
 from .exceptions import OCRUnavailableError, ScreenshotParseError, ValidationError
 from .services import FixtureInput, MatchInput
+from .time_utils import local_now, parse_kickoff_time
 
 
 Image.MAX_IMAGE_PIXELS = 25_000_000
@@ -32,7 +33,12 @@ _DATE_TEXT = re.compile(
     r"[,]?\s+20\d{2}\b",
     re.IGNORECASE,
 )
-_TIME_ONLY = re.compile(r"^\s*\d{1,2}:\d{2}(?:\s*(?:am|pm))?\s*$", re.IGNORECASE)
+_TIME_FRAGMENT = re.compile(
+    r"(?<!\d)(?:(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:am|pm))?|"
+    r"(?:1[0-2]|0?[1-9])(?::?[0-5]\d)?\s*(?:am|pm))(?!\w)",
+    re.IGNORECASE,
+)
+_TIME_ONLY = re.compile(rf"^\s*{_TIME_FRAGMENT.pattern}\s*$", re.IGNORECASE)
 _SCORE_ONLY = re.compile(r"^\s*(\d{1,2})\s*[-:–—]\s*(\d{1,2})(?:\s*(?:FT|AET|Pens?))?\s*$", re.IGNORECASE)
 _TEAM_SCORE = re.compile(r"^\s*(.+?\D)\s+(\d{1,2})(?:\s*(?:FT|AET|Pens?))?\s*$", re.IGNORECASE)
 _STATUS_ONLY = re.compile(
@@ -235,6 +241,31 @@ def _line_dates(lines: Sequence[OCRLine], default_date: date, day_first: bool) -
     return result
 
 
+def _time_in_line(text: str) -> Optional[time]:
+    match = _TIME_FRAGMENT.search(text)
+    if not match:
+        return None
+    try:
+        return parse_kickoff_time(match.group(0))
+    except ValueError:
+        return None
+
+
+def _line_times(lines: Sequence[OCRLine], default_time: time) -> list[time]:
+    current = default_time
+    result = []
+    for line in lines:
+        detected = _time_in_line(line.text)
+        if detected:
+            current = detected
+        result.append(current)
+    return result
+
+
+def _without_time(text: str) -> str:
+    return _clean_ocr_text(_TIME_FRAGMENT.sub("", text, count=1))
+
+
 def _is_metadata_line(text: str) -> bool:
     return bool(
         not text
@@ -260,6 +291,7 @@ def _build_row(
     source_image: str,
     source_text: str,
     position: int,
+    row_time: time = time.min,
     home_goals: Optional[int] = None,
     away_goals: Optional[int] = None,
 ) -> dict:
@@ -274,6 +306,7 @@ def _build_row(
     row = {
         "include": True,
         "match_date": row_date.isoformat(),
+        "kickoff_time": row_time.strftime("%H:%M"),
         "home_team": home,
         "away_team": away,
         "confidence": int(max(0, min(100, confidence))),
@@ -315,13 +348,15 @@ def parse_result_lines(
     default_date: date,
     source_image: str,
     day_first: bool = True,
+    default_time: time = time.min,
 ) -> list[dict]:
     dates = _line_dates(lines, default_date, day_first)
+    times = _line_times(lines, default_time)
     rows: list[dict] = []
     used: set[int] = set()
 
     for index, line in enumerate(lines):
-        combined = _combined_result(line.text)
+        combined = _combined_result(_without_time(line.text))
         if combined:
             home, home_goals, away_goals, away = combined
             rows.append(
@@ -334,6 +369,7 @@ def parse_result_lines(
                     source_image=source_image,
                     source_text=line.text,
                     position=index,
+                    row_time=times[index],
                     home_goals=home_goals,
                     away_goals=away_goals,
                 )
@@ -369,6 +405,7 @@ def parse_result_lines(
                 source_image=source_image,
                 source_text=" | ".join((lines[previous].text, line.text, lines[following].text)),
                 position=previous,
+                row_time=times[index],
                 home_goals=home_goals,
                 away_goals=away_goals,
             )
@@ -398,6 +435,7 @@ def parse_result_lines(
                 source_image=source_image,
                 source_text=f"{lines[first_index].text} | {lines[second_index].text}",
                 position=first_index,
+                row_time=times[first_index],
                 home_goals=home_goals,
                 away_goals=away_goals,
             )
@@ -422,12 +460,14 @@ def parse_fixture_lines(
     default_date: date,
     source_image: str,
     day_first: bool = True,
+    default_time: time = time.min,
 ) -> list[dict]:
     dates = _line_dates(lines, default_date, day_first)
+    times = _line_times(lines, default_time)
     rows: list[dict] = []
     used: set[int] = set()
     for index, line in enumerate(lines):
-        split = _split_fixture_line(line.text)
+        split = _split_fixture_line(_without_time(line.text))
         if not split:
             continue
         rows.append(
@@ -440,6 +480,7 @@ def parse_fixture_lines(
                 source_image=source_image,
                 source_text=line.text,
                 position=index,
+                row_time=times[index],
             )
         )
         used.add(index)
@@ -466,6 +507,7 @@ def parse_fixture_lines(
                 source_image=source_image,
                 source_text=f"{lines[first_index].text} | {lines[second_index].text}",
                 position=first_index,
+                row_time=times[first_index],
             )
         )
     return _deduplicate_rows(rows, results=False)
@@ -477,7 +519,12 @@ def _deduplicate_rows(rows: list[dict], *, results: bool) -> list[dict]:
     for original in sorted(rows, key=lambda item: item.get("_position", 0)):
         row = dict(original)
         row.pop("_position", None)
-        key = (row["match_date"], row["home_team"].casefold(), row["away_team"].casefold())
+        key = (
+            row["match_date"],
+            row.get("kickoff_time", "00:00"),
+            row["home_team"].casefold(),
+            row["away_team"].casefold(),
+        )
         if results:
             key += (row["home_goals"], row["away_goals"])
         if key not in seen:
@@ -494,6 +541,7 @@ def parse_screenshot(
     default_date: date,
     source_image: str,
     day_first: bool = True,
+    default_time: time = time.min,
 ) -> ParsedScreenshot:
     lines = extract_ocr_lines(payload)
     if mode == "results":
@@ -503,6 +551,7 @@ def parse_screenshot(
             default_date=default_date,
             source_image=source_image,
             day_first=day_first,
+            default_time=default_time,
         )
     elif mode == "fixtures":
         rows = parse_fixture_lines(
@@ -511,6 +560,7 @@ def parse_screenshot(
             default_date=default_date,
             source_image=source_image,
             day_first=day_first,
+            default_time=default_time,
         )
     else:
         raise ValueError("mode must be 'results' or 'fixtures'")
@@ -545,6 +595,7 @@ def match_inputs_from_review(frame: pd.DataFrame, league_code: str, season: str)
                 away_team=str(row["away_team"]).strip(),
                 home_goals=int(row["home_goals"]),
                 away_goals=int(row["away_goals"]),
+                kickoff_time=parse_kickoff_time(row.get("kickoff_time")),
             )
             if not item.home_team or not item.away_team:
                 raise ValueError("both team names are required")
@@ -554,7 +605,7 @@ def match_inputs_from_review(frame: pd.DataFrame, league_code: str, season: str)
                 raise ValueError("scores must be whole numbers")
             if not _valid_score(item.home_goals, item.away_goals):
                 raise ValueError("scores must be between 0 and 30")
-            key = (item.match_date, item.home_team.casefold(), item.away_team.casefold())
+            key = (item.kickoff_at, item.home_team.casefold(), item.away_team.casefold())
             if key in seen:
                 raise ValueError("duplicate fixture in confirmation table")
             seen.add(key)
@@ -583,14 +634,15 @@ def fixture_inputs_from_review(
                 match_date=pd.to_datetime(row["match_date"], errors="raise").date(),
                 home_team=str(row["home_team"]).strip(),
                 away_team=str(row["away_team"]).strip(),
+                kickoff_time=parse_kickoff_time(row.get("kickoff_time")),
             )
             if not item.home_team or not item.away_team:
                 raise ValueError("both team names are required")
             if item.home_team.casefold() == item.away_team.casefold():
                 raise ValueError("home and away teams must be different")
-            if item.match_date < date.today():
-                raise ValueError("an upcoming fixture date cannot be in the past")
-            key = (item.match_date, item.home_team.casefold(), item.away_team.casefold())
+            if item.kickoff_at < local_now():
+                raise ValueError("an upcoming fixture kickoff cannot be in the past")
+            key = (item.kickoff_at, item.home_team.casefold(), item.away_team.casefold())
             if key in seen:
                 raise ValueError("duplicate fixture in confirmation table")
             seen.add(key)

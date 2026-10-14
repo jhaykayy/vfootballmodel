@@ -56,7 +56,7 @@ def rebuild_elo_history(session: Session, league_id: int) -> dict[int, float]:
                     match_id=match.id,
                     rating_before=home_before,
                     rating_after=home_after,
-                    recorded_at=match.match_date,
+                    recorded_at=match.match_date.date(),
                 ),
                 EloRatingHistory(
                     league_id=league_id,
@@ -64,7 +64,7 @@ def rebuild_elo_history(session: Session, league_id: int) -> dict[int, float]:
                     match_id=match.id,
                     rating_before=away_before,
                     rating_after=away_after,
-                    recorded_at=match.match_date,
+                    recorded_at=match.match_date.date(),
                 ),
             ]
         )

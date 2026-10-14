@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     JSON,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -62,7 +63,7 @@ class CompletedMatch(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"), index=True)
     season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"), index=True)
-    match_date: Mapped[date] = mapped_column(Date, index=True)
+    match_date: Mapped[datetime] = mapped_column(DateTime, index=True)
     home_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), index=True)
     away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), index=True)
     home_goals: Mapped[int] = mapped_column(Integer)
@@ -86,7 +87,7 @@ class UpcomingFixture(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     league_id: Mapped[int] = mapped_column(ForeignKey("leagues.id"), index=True)
     season_id: Mapped[Optional[int]] = mapped_column(ForeignKey("seasons.id"), nullable=True)
-    match_date: Mapped[date] = mapped_column(Date, index=True)
+    match_date: Mapped[datetime] = mapped_column(DateTime, index=True)
     home_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), index=True)
     away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), index=True)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", index=True)
@@ -115,7 +116,7 @@ class ModelVersion(Base):
     version: Mapped[str] = mapped_column(String(64), unique=True)
     algorithm: Mapped[str] = mapped_column(String(128))
     artifact_path: Mapped[str] = mapped_column(Text)
-    training_cutoff: Mapped[date] = mapped_column(Date)
+    training_cutoff: Mapped[datetime] = mapped_column(DateTime)
     training_matches: Mapped[int] = mapped_column(Integer)
     validation_log_loss: Mapped[float] = mapped_column(Float)
     test_log_loss: Mapped[float] = mapped_column(Float)
@@ -124,6 +125,24 @@ class ModelVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     league: Mapped[League] = relationship()
+
+
+class ModelArtifact(Base):
+    __tablename__ = "model_artifacts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_version_id: Mapped[int] = mapped_column(
+        ForeignKey("model_versions.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    payload: Mapped[bytes] = mapped_column(LargeBinary)
+    sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class SchemaMetadata(Base):
+    __tablename__ = "schema_metadata"
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class TrainingRun(Base):

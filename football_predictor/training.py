@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
-import joblib
 import numpy as np
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -19,6 +17,7 @@ from .ml import (
     predict_probability_components,
     refit_bundle_for_deployment,
 )
+from .model_storage import load_model_bundle, model_bundle_exists, save_model_bundle
 from .models import League, ModelMetric, ModelVersion, TrainingRun
 
 
@@ -107,8 +106,8 @@ def train_league(
             )
         )
         previous_on_current_test = None
-        if current and Path(current.artifact_path).exists():
-            previous_bundle = joblib.load(current.artifact_path)
+        if current and model_bundle_exists(session, current):
+            previous_bundle = load_model_bundle(session, current)
             previous_on_current_test = _evaluate_existing(previous_bundle, test_frame)
         promote = current is None
         if previous_on_current_test is not None:
@@ -153,7 +152,7 @@ def train_league(
         session.add(model_version)
         session.flush()
         artifact_path = settings.model_dir / f"{version_name}.joblib"
-        joblib.dump(deployed_bundle, artifact_path)
+        save_model_bundle(session, model_version, deployed_bundle, artifact_path)
         model_version.artifact_path = str(artifact_path)
         if promote:
             session.execute(
