@@ -14,10 +14,30 @@ _engine: Optional[Engine] = None
 _session_factory: Optional[sessionmaker] = None
 
 
+def normalize_database_url(database_url: str) -> str:
+    """Use Psycopg 3 for PostgreSQL URLs supplied by hosting providers."""
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+psycopg://", 1)
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return database_url
+
+
 def create_db_engine(database_url: Optional[str] = None) -> Engine:
-    url = database_url or get_settings().database_url
+    url = normalize_database_url(database_url or get_settings().database_url)
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    engine = create_engine(url, future=True, connect_args=connect_args)
+    engine_options = {
+        "future": True,
+        "connect_args": connect_args,
+    }
+    if url.startswith("postgresql"):
+        engine_options.update(
+            pool_pre_ping=True,
+            pool_recycle=300,
+            pool_size=3,
+            max_overflow=2,
+        )
+    engine = create_engine(url, **engine_options)
     if url.startswith("sqlite"):
         @event.listens_for(engine, "connect")
         def _enable_sqlite_constraints(dbapi_connection, _connection_record):  # type: ignore[no-untyped-def]

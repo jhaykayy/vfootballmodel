@@ -102,7 +102,35 @@ export VFOOTBALL_MODEL_DIR=/path/to/models
 export VFOOTBALL_DATABASE_URL=sqlite:////absolute/path/vfootball.db
 ```
 
-SQLAlchemy isolates persistence from the UI so a future PostgreSQL migration can use `VFOOTBALL_DATABASE_URL` with a PostgreSQL driver and a proper migration tool.
+### Shared PostgreSQL database (Supabase)
+
+To share records between a local instance and a Streamlit Community Cloud deployment, use the same Supabase PostgreSQL connection string in both environments. Choose **Session pooler** and **URI** in Supabase's **Connect** dialog. The application accepts either `postgresql://` or `postgresql+psycopg://` and automatically uses Psycopg 3.
+
+For local development, keep the connection string out of source control:
+
+```bash
+export VFOOTBALL_DATABASE_URL='postgresql://postgres.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require'
+streamlit run streamlit_app.py
+```
+
+For Streamlit Community Cloud, open **Manage app → Settings → Secrets** and add:
+
+```toml
+VFOOTBALL_DATABASE_URL = "postgresql://postgres.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require"
+```
+
+Replace the placeholders with the URI copied from Supabase. Never commit the completed URI or `.streamlit/secrets.toml`; the latter is already ignored by this repository. On first connection, the application creates its schema and five supported leagues automatically. An existing SQLite database is separate and is not copied automatically.
+
+To verify the connection and migrate only completed-match history from the default local SQLite database, first install the current requirements and set the PostgreSQL URI in the same terminal:
+
+```bash
+.venv/bin/pip install -r requirements.txt
+export VFOOTBALL_DATABASE_URL='YOUR_COMPLETE_SUPABASE_SESSION_POOLER_URI'
+.venv/bin/python scripts/migrate_match_history.py
+.venv/bin/python scripts/migrate_match_history.py --apply
+```
+
+The first migration command is read-only and prints both database counts. The `--apply` command copies matches, skips identical records, rejects conflicting duplicates, rebuilds Elo history, and verifies the copied data. It never deletes or modifies the source SQLite file. The app sidebar also states whether it is using shared PostgreSQL or local SQLite and shows that database's completed-match count.
 
 ## Tests
 

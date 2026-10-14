@@ -3,6 +3,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import func, select
 
+from football_predictor.db import normalize_database_url
 from football_predictor.exceptions import DuplicateMatchError
 from football_predictor.models import CompletedMatch, EloRatingHistory
 from football_predictor.services import (
@@ -12,6 +13,24 @@ from football_predictor.services import (
     delete_completed_matches,
     update_completed_match,
 )
+
+
+@pytest.mark.parametrize(
+    ("provided", "expected"),
+    [
+        (
+            "postgresql://user:password@example.com:5432/postgres?sslmode=require",
+            "postgresql+psycopg://user:password@example.com:5432/postgres?sslmode=require",
+        ),
+        (
+            "postgres://user:password@example.com:5432/postgres",
+            "postgresql+psycopg://user:password@example.com:5432/postgres",
+        ),
+        ("sqlite:////tmp/vfootball.db", "sqlite:////tmp/vfootball.db"),
+    ],
+)
+def test_database_url_normalization(provided, expected):
+    assert normalize_database_url(provided) == expected
 
 
 def test_add_match_prevents_duplicates_and_rebuilds_elo(session):

@@ -6,14 +6,15 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from football_predictor.analytics import accuracy_by_league, dashboard_summary, performance_rows
 from football_predictor.config import PROJECT_ROOT, get_settings
-from football_predictor.db import initialize_database, session_scope
+from football_predictor.db import get_engine, initialize_database, session_scope
 from football_predictor.exceptions import FootballPredictorError, InsufficientDataError
 from football_predictor.importers import parse_fixture_upload, parse_match_upload
 from football_predictor.models import (
+    CompletedMatch,
     League,
     ModelMetric,
     ModelVersion,
@@ -117,6 +118,13 @@ page = st.sidebar.radio(
     ],
 )
 st.sidebar.caption("Probabilities are model estimates, not guarantees.")
+with session_scope() as session:
+    database_match_count = int(session.scalar(select(func.count(CompletedMatch.id))) or 0)
+if get_engine().dialect.name == "postgresql":
+    st.sidebar.success("Shared PostgreSQL connected")
+else:
+    st.sidebar.info("Local SQLite database")
+st.sidebar.caption(f"{database_match_count:,} completed matches in this database")
 
 
 if page == "Dashboard":
